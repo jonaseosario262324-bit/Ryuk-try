@@ -1,0 +1,85 @@
+name: RDP-Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Habilitar Escritorio Remoto
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          
+          # Configurar seguridad para permitir conexiones (Desactivar NLA para mayor compatibilidad)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1
+          
+          # Configurar Firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+
+      - name: Create RDP User with Secure Password
+        run: |
+          # Generar contraseña segura sin caracteres conflictivos (" ' $ `)
+          $alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#%^*"
+          $password = -join (1..16 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] })
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Crear el usuario
+          New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires -Description "GitHub Actions RDP User"
+          
+          # Asignar a grupos de Administradores y Usuarios de Escritorio Remoto
+          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+          
+          # Guardar contraseña en el entorno de GitHub
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          Write-Host "Usuario creado con exito."
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Conectar usando la Auth Key de tus Secrets
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-windows-runner
+          
+          # Obtener la IP de Tailscale
+          $tsIP = $null
+          for ($i=0; $i -lt 10; $i++) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 5
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "No se pudo obtener la IP de Tailscale."
+              exit 1
+          }
+          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Maintain Connection & Show Credentials
+        run: |
+          Write-Host "`n=========================================="
+          Write-Host "       DATOS DE CONEXIÓN RDP"
+          Write-Host "=========================================="
+          Write-Host "IP de Tailscale: $env:TS_IP"
+          Write-Host "Usuario       : RDPUser"
+          Write-Host "Contraseña    : $env:RDP_PASS"
+          Write-Host "=========================================="
+          Write-Host "Manteniendo la conexion activa... No cierres este workflow."
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] Runner en linea..."
+              Start-Sleep -Seconds 300
+          }
